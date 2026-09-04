@@ -15,7 +15,9 @@ REMOTE="${1:-https://github.com/JWgpc/agent_ES.git}"
 BRANCH="${2:-main}"
 
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-  git -c 'credential.helper=!/usr/bin/gh auth git-credential' \
+  git -c http.version=HTTP/1.1 \
+      -c http.postBuffer=524288000 \
+      -c 'credential.helper=!/usr/bin/gh auth git-credential' \
   push -u "$REMOTE" "$BRANCH"
 
 echo "Pushed to $REMOTE ($BRANCH)"
