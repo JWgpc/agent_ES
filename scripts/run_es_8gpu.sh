@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Full ES smoke: N parallel SGLang groups + ClawGym batch rollout.
-# Default matches 8-GPU layout (4 groups × TP=2 × 8 tasks). Override via env vars.
+# 8×GPU layout: 4 SGLang groups × TP=2, each group runs 8 ClawGym tasks per generation.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,13 +7,13 @@ cd "$ROOT"
 
 BASE_DIR="${BASE_DIR:-/dev/gpc_code/model/Qwen3_5_9B/Qwen3___5-9B}"
 RUNS_ROOT="${RUNS_ROOT:-/data/gpc/agentic_es/runs}"
-RUN_ID="${RUN_ID:-clawgym_es_smoke_$(date -u +%Y%m%d_%H%M%S)}"
+RUN_ID="${RUN_ID:-clawgym_es_8gpu_$(date -u +%Y%m%d_%H%M%S)}"
 RUN_ROOT="${RUN_ROOT:-${RUNS_ROOT}/${RUN_ID}}"
 
 NUM_GPUS="${NUM_GPUS:-8}"
-NUM_GROUPS="${NUM_GROUPS:-${POPULATION:-4}}"
+NUM_GROUPS="${NUM_GROUPS:-4}"
 TP_SIZE="${TP_SIZE:-2}"
-TASKS_PER_GROUP="${TASKS_PER_GROUP:-${TASK_LIMIT:-8}}"
+TASKS_PER_GROUP="${TASKS_PER_GROUP:-8}"
 CONCURRENCY="${CONCURRENCY:-8}"
 GENERATIONS="${GENERATIONS:-2}"
 GPU_OFFSET="${GPU_OFFSET:-0}"

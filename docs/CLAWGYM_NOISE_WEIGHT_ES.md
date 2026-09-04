@@ -151,7 +151,8 @@ w_i = (r_i - mean(r)) / (std(r) + 1e-8)
 
 ### 5.1 ClawGym 任务
 
-- **默认数据集**：`/dev/gpc_code/clawGym/ClawGym-Agents/RL/data/clawgym_eval/`（80 题）
+- **训练 rollout**：`data/clawgym_train/`（2000 题，每代抽 N 题且不重复）
+- **周期性 eval**：`data/clawgym_eval/`（80 题 holdout）
 - **单任务目录**：
   ```text
   task_XXXX/
@@ -168,6 +169,17 @@ w_i = (r_i - mean(r)) / (std(r) + 1e-8)
 2. 准备 workspace，挂载 input_files
 3. ReAct tool loop：调用 SGLang `/v1/chat/completions`（tools + reasoning）
 4. 执行 `reward.sh` → 标量 reward
+
+**Agent loop 长度限制**（CLI 可配）：
+
+| 参数 | 默认 | 含义 |
+|------|------|------|
+| `--max-turns` | 32 | 单题最多 ReAct 轮数 |
+| `--max-tokens` | 8192 | 单轮 LLM 最大生成 token |
+| `--max-total-tokens` | 65536 | 单题整条轨迹总 token 预算（prompt+completion）；0=不限制 |
+| `--context-length` | 65536 | SGLang 服务端 KV 窗口（应 ≥ max_total_tokens） |
+
+每轮会根据当前 prompt 估算 token，动态 cap 本轮 `max_tokens`，避免超出总预算。
 
 ### 5.3 依赖
 
@@ -246,18 +258,27 @@ OPENCLAW_MODEL_ID=your-model-id \
 
 ## 7. 超参数
 
-| 参数 | Smoke 默认 | 说明 |
-|------|-----------|------|
-| `population` | 2~4 | 每代候选数 = seed 数 = 并行 SGLang 数 |
-| `task_limit` | 8 | 每代抽样任务数（case_batch） |
-| `generations` | 2~3 | ES 代数 |
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `num_gpus` | 8 | 总 GPU 数 |
+| `num_groups` / `population` | 4 | ES 候选数 = 并行 SGLang 组数 |
+| `tp_size` | 2 | 每组 SGLang 的 tensor parallel |
+| `tasks_per_group` | 8 | 每组每代跑多少 ClawGym 题 |
+| `concurrency` | 8 | 组内并行 rollout 数（通常 = tasks_per_group） |
+| `generations` | 2 | ES 代数 |
 | `alpha` | 5e-4 | 永久更新步长 |
 | `sigma_start/end` | 1e-3 | 评估扰动幅度 |
 | `sigma_schedule` | constant | 可改 cosine |
 | `reward_normalization` | zscore | 可选 centered_rank |
 | `es_seed` | 20260627 | 控制每代 seed 序列 |
-| `tp_size` | 1 | 每个 SGLang 实例 TP |
-| `concurrency` | 2 | ClawGym 并行任务数 |
+| `gpu_offset` | 0 | 未指定 `--gpus` 时从该 id 起连续分配 |
+| `max_turns` / `max_steps` | 32 | 单题最大 ReAct 轮数 |
+| `max_tokens` | 8192 | 单轮最大生成长度 |
+| `max_total_tokens` | 65536 | 单题轨迹总 token 上限 |
+| `context_length` | 65536 | SGLang `--context-length` |
+| `turn_timeout` | 300 | 单轮 HTTP 超时（秒） |
+
+**约束**：`num_groups × tp_size == num_gpus`。未传 `--gpus` 时自动使用 `gpu_offset .. gpu_offset+num_gpus-1`。
 
 配置文件：`configs/smoke.yaml`（参考用，脚本以 CLI/env 为准）。
 
@@ -265,11 +286,27 @@ OPENCLAW_MODEL_ID=your-model-id \
 
 ## 8. GPU 与资源规划（8×A800）
 
-| 方案 | 配置 | 说明 |
-|------|------|------|
-| 推荐 | N=4, TP=1, 4 卡 | 4 路候选并行 |
-| 备选 | N=2, TP=2, 4 卡 | 显存更宽裕 |
-| 不可行 | N=16 同时全量 9B | 需顺序评估或 LoRA 化 delta |
+**推荐默认布局**（已实现为 CLI 默认值）：
+
+```text
+8 GPU = 4 groups × TP=2
+每组 SGLang 每 step 跑 8 题（concurrency=8）
+→ 一代共 4 个 ES 候选 × 8 题 = 32 次 rollout
+```
+
+```bash
+./scripts/run_es_8gpu.sh
+# 或
+python train_es_clawgym.py \
+  --num-gpus 8 --num-groups 4 --tp-size 2 \
+  --tasks-per-group 8 --concurrency 8
+```
+
+| 方案 | num_groups | tp_size | num_gpus | 说明 |
+|------|------------|---------|----------|------|
+| **默认** | 4 | 2 | 8 | 8 卡全用，4 路候选并行 |
+| 小显存 smoke | 2 | 1 | 2 | 2 卡调试 |
+| 单组大 TP | 1 | 4 | 4 | 仅 1 候选，TP=4 |
 
 **磁盘**：每个候选 merge 约 18GB（9B bf16），N=4 一代临时占用 ~72GB；训练完可 `--cleanup-merged` 删除。
 
@@ -283,12 +320,35 @@ OPENCLAW_MODEL_ID=your-model-id \
 
 ```text
 runs/<run_id>/
-├── history.json           # 每代 seeds/rewards/weights/σ/α
-├── noise_weight/          # 累积 delta（safetensors + meta）
-├── gen_0000/              # 各代候选 merge/rollout 日志（可选清理）
-├── logs/                  # SGLang 日志
-└── final_merged/          # 训练结束 base + noise_weight
+├── history.json                    # 每代 seeds/rewards/weights/σ/α + checkpoint/eval 记录
+├── noise_weight/                   # 最新累积 delta（每代覆盖）
+├── checkpoints/
+│   └── checkpoint_gen0004/         # --save-step N 时额外快照
+├── gen_0000/
+│   ├── candidate_00_rollout/       # 每组 rollout 落盘
+│   │   ├── summary.json
+│   │   ├── rollout_meta.json
+│   │   └── tasks/<task_id>/
+│   │       ├── result.json
+│   │       ├── transcript.json     # OpenAI messages 原始格式
+│   │       ├── trajectory.json     # 结构化轨迹：user_query + 每轮 assistant/tool
+│   │       └── workspace/ ...
+│   └── generation_rollout_summary.json
+├── eval_gen0004/                   # --eval-step N 时的 eval rollout
+├── logs/                           # SGLang 日志
+└── final_merged/                   # 训练结束 base + noise_weight
 ```
+
+### 周期性保存
+
+| 参数 | 默认 | 行为 |
+|------|------|------|
+| `--save-step N` | 0（关） | 每 N 代额外保存 `checkpoints/checkpoint_genXXXX/noise_weight` |
+| `--eval-step N` | 0（关） | 每 N 代在 eval 集上跑一轮 eval（`eval_genXXXX/`） |
+
+触发条件：第 5、10、15… 代（即 `(generation+1) % N == 0`）。`--eval-interval` 为 `--eval-step` 别名。
+
+每代仍照常更新 `noise_weight/` 与 `history.json`；`save-step` 是**额外**快照，不替代默认保存。
 
 ### history.json 结构（摘要）
 
@@ -335,7 +395,9 @@ A：从 `1e-3` 试起，观察一代内 reward 方差；过大则模型输出可
 - [ ] 正式规模：`generations=20~50`，`task_limit=32~80`，σ cosine
 - [ ] 固定 task 子集 vs 每代 resample 对比
 - [ ] 与 QwenClawBench 100 题打通（当前默认 clawgym_eval 80）
-- [ ] 评估 hook：`--eval-interval K` 跑全量 eval
+- [x] 评估 hook：`--eval-step N`（`--eval-interval` 别名）跑 eval
+- [x] 周期性 checkpoint：`--save-step N` 额外保存 noise_weight
+- [x] 每代 rollout 落盘：`summary.json` + `tasks/*/result.json` + `generation_rollout_summary.json`
 - [ ] 若 merge 成为瓶颈：探索 LoRA 化 delta 或顺序候选评估
 
 ---

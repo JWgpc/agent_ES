@@ -7,7 +7,7 @@ cd "$ROOT"
 
 BASE_DIR="${BASE_DIR:-/dev/gpc_code/model/Qwen3_5_9B/Qwen3___5-9B}"
 NOISE_WEIGHT_DIR="${1:-}"
-RUN_ROOT="${RUN_ROOT:-/dev/gpc_code/agentic_es/runs/eval_only}"
+RUN_ROOT="${RUN_ROOT:-/data/gpc/agentic_es/runs/eval_only}"
 GPUS="${GPUS:-0}"
 
 if [[ -z "$NOISE_WEIGHT_DIR" ]]; then

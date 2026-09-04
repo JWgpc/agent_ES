@@ -23,9 +23,25 @@ def mix_seed(base_seed: int, tensor_id: int) -> int:
     return (int(base_seed) ^ int(tensor_id)) & 0xFFFFFFFFFFFFFFFF
 
 
+def parse_csv_floats(value: str) -> list[float]:
+    return [float(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def parse_csv_ints(value: str) -> list[int]:
+    return [int(item.strip()) for item in value.split(",") if item.strip()]
+
+
 def iter_flat_chunks(numel: int, chunk_size: int = CHUNK_SIZE):
     for start in range(0, int(numel), int(chunk_size)):
         yield start, min(start + int(chunk_size), int(numel))
+
+
+def _advance_generator(generator: torch.Generator, *, steps: int) -> None:
+    remaining = int(steps)
+    while remaining > 0:
+        step = min(remaining, CHUNK_SIZE)
+        torch.randn((step,), generator=generator, dtype=torch.float32)
+        remaining -= step
 
 
 @torch.no_grad()
@@ -34,13 +50,17 @@ def apply_seeded_noise_tensors(
     *,
     seed: int,
     sigma: float,
+    flat_offsets: dict[str, int] | None = None,
 ) -> None:
     if not math.isfinite(float(sigma)):
         raise ValueError("sigma must be finite")
-    for _, tensor_id, tensor in tensors:
+    for name, tensor_id, tensor in tensors:
         flat = tensor.view(-1)
+        flat_offset = int((flat_offsets or {}).get(name, 0))
         generator = torch.Generator(device=tensor.device)
         generator.manual_seed(mix_seed(seed, tensor_id))
+        if flat_offset:
+            _advance_generator(generator, steps=flat_offset)
         for start, end in iter_flat_chunks(flat.numel()):
             noise = torch.randn(
                 (end - start,),
@@ -86,6 +106,7 @@ def es_update_tensors(
     seeds: Sequence[int],
     weights: Sequence[float],
     alpha: float,
+    flat_offsets: dict[str, int] | None = None,
 ) -> None:
     if not seeds:
         raise ValueError("ES update requires at least one seed")
@@ -95,13 +116,16 @@ def es_update_tensors(
         raise ValueError("alpha must be finite and non-negative")
 
     scale = float(alpha) / float(len(seeds))
-    for _, tensor_id, tensor in tensors:
+    for name, tensor_id, tensor in tensors:
         flat = tensor.view(-1)
+        flat_offset = int((flat_offsets or {}).get(name, 0))
         generators: list[torch.Generator] = []
         coeffs: list[float] = []
         for seed, weight in zip(seeds, weights):
             generator = torch.Generator(device=tensor.device)
             generator.manual_seed(mix_seed(int(seed), tensor_id))
+            if flat_offset:
+                _advance_generator(generator, steps=flat_offset)
             generators.append(generator)
             coeffs.append(scale * float(weight))
 

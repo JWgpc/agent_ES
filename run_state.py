@@ -32,3 +32,16 @@ def completed_update_records(history: list[dict[str, Any]]) -> list[dict[str, An
         if "generation" in item and "seeds" in item and "weights" in item:
             records.append(item)
     return records
+
+
+def used_task_ids_from_history(history: list[dict[str, Any]]) -> set[str]:
+    used: set[str] = set()
+    for item in completed_update_records(history):
+        for task_id in item.get("case_batch", []):
+            used.add(str(task_id))
+    return used
+
+
+def should_run_periodic(*, step: int, interval: int) -> bool:
+    """True when 1-based step index hits interval (e.g. step=4, interval=5 -> False; step=4 -> gen 5)."""
+    return interval > 0 and (step + 1) % interval == 0

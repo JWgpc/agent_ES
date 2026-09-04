@@ -7,7 +7,7 @@ from pathlib import Path
 
 from es_core import normalize_rewards
 from noise_weight import NoiseWeightStore
-from run_state import atomic_write_json, completed_update_records, read_history
+from run_state import atomic_write_json, completed_update_records, read_history, used_task_ids_from_history
 from train_es_clawgym import replay_noise_weight_updates
 
 
@@ -39,6 +39,31 @@ class TestRunState(unittest.TestCase):
             replayed = replay_noise_weight_updates(store, loaded, default_alpha=0.001)
             self.assertEqual(replayed, 1)
             self.assertTrue(any(torch.any(t != 0) for t in store.tensors.values()))
+
+    def test_used_task_ids_from_history(self) -> None:
+        history = [
+            {"config": {}},
+            {"generation": 0, "seeds": [1], "weights": [1.0], "case_batch": ["task_0001", "task_0002"]},
+        ]
+        self.assertEqual(used_task_ids_from_history(history), {"task_0001", "task_0002"})
+
+
+class TestTaskSampling(unittest.TestCase):
+    def test_sample_without_overlap(self) -> None:
+        from clawgym_es_rollout import TaskSpec
+
+        pool = [
+            TaskSpec(Path(f"/tmp/{i}"), f"task_{i:04d}", "q", None, {})
+            for i in range(10)
+        ]
+        from clawgym_es_rollout import sample_tasks
+
+        first = sample_tasks(pool, limit=3, seed=42)
+        used = {task.task_id for task in first}
+        second = sample_tasks(pool, limit=3, seed=43, exclude=used)
+        self.assertEqual(len(first), 3)
+        self.assertEqual(len(second), 3)
+        self.assertTrue(used.isdisjoint({task.task_id for task in second}))
 
 
 if __name__ == "__main__":

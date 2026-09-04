@@ -1,12 +1,15 @@
 # Smoke configuration for ClawGym + noise_weight ES
+# Layout: num_groups * tp_size == num_gpus (default 4 * 2 = 8)
 
 run_id: clawgym_es_smoke
 base_dir: /dev/gpc_code/model/Qwen3_5_9B/Qwen3___5-9B
-dataset_dir: /dev/gpc_code/clawGym/ClawGym-Agents/RL/data/clawgym_eval
+dataset_dir: /dev/gpc_code/clawGym/ClawGym-Agents/RL/data/clawgym_train
+eval_dataset_dir: /dev/gpc_code/clawGym/ClawGym-Agents/RL/data/clawgym_eval
 
 generations: 2
-population: 2
-task_limit: 8
+num_groups: 4
+num_gpus: 8
+tasks_per_group: 8
 task_seed: 42
 
 alpha: 0.0005
@@ -16,16 +19,20 @@ sigma_schedule: constant
 reward_normalization: zscore
 es_seed: 20260627
 
-gpus: "0,1"
+gpu_offset: 0
 base_port: 12000
-tp_size: 1
+tp_size: 2
 mem_fraction: 0.85
 context_length: 65536
-concurrency: 2
-max_steps: 32
+concurrency: 8
+max_turns: 32
+max_tokens: 8192
+max_total_tokens: 65536
 turn_timeout: 300
 sandbox: docker
 served_model_name: clawgym-es
 
 eval_interval: 0
+eval_step: 0
+save_step: 0
 cleanup_merged: true

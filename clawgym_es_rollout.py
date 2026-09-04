@@ -10,11 +10,16 @@ import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+from run_state import atomic_write_json
+
 RL_DIR = Path(__file__).resolve().parents[1] / "clawGym" / "ClawGym-Agents" / "RL"
-DEFAULT_DATASET = RL_DIR / "data" / "clawgym_eval"
+DEFAULT_TRAIN_DATASET = RL_DIR / "data" / "clawgym_train"
+DEFAULT_EVAL_DATASET = RL_DIR / "data" / "clawgym_eval"
+DEFAULT_DATASET = DEFAULT_TRAIN_DATASET
 CORRECT_THRESHOLD = 0.5
 
 
@@ -76,11 +81,49 @@ def _load_task_spec(entry_path: Path) -> TaskSpec:
 
 
 def _ensure_clawgym_runtime_paths() -> None:
-    slime_root = Path(os.environ.get("SLIME_ROOT", "/dev/gpc_code/slime_0427/slime"))
-    for path in (slime_root, RL_DIR):
-        text = str(path)
-        if text not in sys.path:
-            sys.path.insert(0, text)
+    text = str(RL_DIR)
+    if text not in sys.path:
+        sys.path.insert(0, text)
+
+
+def load_task_pool(
+    dataset_dir: Path,
+    *,
+    suite: str = "all",
+) -> list[TaskSpec]:
+    """Load all tasks matching suite (no per-run sampling)."""
+    entries = _discover_task_entries(dataset_dir)
+    tasks = [_load_task_spec(path) for path in entries]
+    if suite.strip().lower() not in {"", "all"}:
+        wanted = {item.strip() for item in suite.split(",") if item.strip()}
+        tasks = [task for task in tasks if task.task_id in wanted]
+        missing = wanted - {task.task_id for task in tasks}
+        if missing:
+            raise ValueError(f"unknown task id(s): {sorted(missing)}")
+    return tasks
+
+
+def sample_tasks(
+    pool: Sequence[TaskSpec],
+    *,
+    limit: int,
+    seed: int,
+    exclude: set[str] | None = None,
+) -> list[TaskSpec]:
+    """Sample tasks without replacement from pool, skipping exclude ids."""
+    blocked = exclude or set()
+    available = [task for task in pool if task.task_id not in blocked]
+    if limit <= 0:
+        return list(available)
+    if limit > len(available):
+        raise ValueError(
+            f"need {limit} fresh task(s) but only {len(available)} unused "
+            f"({len(blocked)} already used in prior generation(s))"
+        )
+    rng = random.Random(seed)
+    picked = rng.sample(available, limit)
+    picked.sort(key=lambda task: task.task_id)
+    return picked
 
 
 def load_tasks(
@@ -90,18 +133,10 @@ def load_tasks(
     limit: int = 0,
     seed: int = 42,
 ) -> list[TaskSpec]:
-    entries = _discover_task_entries(dataset_dir)
-    tasks = [_load_task_spec(path) for path in entries]
-    if suite.strip().lower() not in {"", "all"}:
-        wanted = {item.strip() for item in suite.split(",") if item.strip()}
-        tasks = [task for task in tasks if task.task_id in wanted]
-        missing = wanted - {task.task_id for task in tasks}
-        if missing:
-            raise ValueError(f"unknown task id(s): {sorted(missing)}")
+    """Load tasks; when limit>0 sample once (legacy helper). Prefer load_task_pool + sample_tasks."""
+    tasks = load_task_pool(dataset_dir, suite=suite)
     if limit > 0 and len(tasks) > limit:
-        rng = random.Random(seed)
-        tasks = rng.sample(tasks, limit)
-        tasks.sort(key=lambda task: task.task_id)
+        return sample_tasks(tasks, limit=limit, seed=seed)
     return tasks
 
 
@@ -116,6 +151,35 @@ def mean_reward(results: Sequence[dict]) -> float:
     return float(statistics.mean(rewards))
 
 
+def persist_rollout_summary(
+    *,
+    run_dir: Path,
+    summary: dict,
+    rollout_id: int,
+    sandbox: str,
+    task_ids: Sequence[str],
+) -> Path:
+    """Write summary.json + rollout_meta.json under run_dir for offline inspection."""
+    run_dir = run_dir.resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = run_dir / "summary.json"
+    atomic_write_json(summary_path, summary)
+    meta = {
+        "rollout_id": rollout_id,
+        "sandbox": sandbox,
+        "task_ids": list(task_ids),
+        "n_tasks": len(task_ids),
+        "model_url": summary.get("model_url"),
+        "model_id": summary.get("model_id"),
+        "avg_reward": summary.get("avg_reward"),
+        "accuracy": summary.get("accuracy"),
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "summary_path": str(summary_path),
+    }
+    atomic_write_json(run_dir / "rollout_meta.json", meta)
+    return summary_path
+
+
 def batch_rollout(
     *,
     tasks: Sequence[TaskSpec],
@@ -124,7 +188,10 @@ def batch_rollout(
     run_dir: Path,
     concurrency: int = 4,
     max_steps: int | None = None,
+    max_tokens: int | None = None,
+    max_total_tokens: int | None = None,
     turn_timeout: int | None = None,
+    task_timeout_seconds: int | None = None,
     sandbox: str = "docker",
     rollout_id: int = 0,
     quiet: bool = True,
@@ -135,7 +202,13 @@ def batch_rollout(
     _configure_sandbox_env(sandbox)
     run_dir.mkdir(parents=True, exist_ok=True)
     max_steps = max_steps or int(os.environ.get("OPENCLAW_MAX_REACT_STEPS", "32"))
+    if max_tokens is None:
+        max_tokens = int(os.environ.get("OPENCLAW_MAX_TOKENS", "8192"))
+    if max_total_tokens is None:
+        max_total_tokens = int(os.environ.get("OPENCLAW_MAX_TOTAL_TOKENS", "0"))
     turn_timeout = turn_timeout or int(os.environ.get("OPENCLAW_CHAT_TURN_TIMEOUT", "300"))
+    if task_timeout_seconds is None:
+        task_timeout_seconds = int(os.environ.get("OPENCLAW_TASK_TIMEOUT_SECONDS", "0"))
 
     results: list[dict] = []
     errors: list[str] = []
@@ -149,7 +222,10 @@ def batch_rollout(
             model_url=model_url,
             model_id=model_id,
             max_steps=max_steps,
+            max_tokens=max_tokens,
+            max_total_tokens=max_total_tokens,
             turn_timeout=turn_timeout,
+            task_timeout_seconds=task_timeout_seconds,
             sandbox=sandbox,
             keep_workspace=False,
             quiet=quiet,
@@ -183,7 +259,7 @@ def batch_rollout(
         for row in results
         if row.get("status") == "ok" and float(row.get("reward", 0)) > CORRECT_THRESHOLD
     )
-    return {
+    summary = {
         "model_url": model_url,
         "model_id": model_id,
         "n_tasks": len(tasks),
@@ -194,7 +270,21 @@ def batch_rollout(
         "accuracy": (n_correct / n_ok) if n_ok else 0.0,
         "results": sorted(results, key=lambda row: row.get("task_id", "")),
         "errors": errors,
+        "rollout_id": rollout_id,
+        "sandbox": sandbox,
+        "max_steps": max_steps,
+        "max_tokens": max_tokens,
+        "max_total_tokens": max_total_tokens,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
     }
+    persist_rollout_summary(
+        run_dir=run_dir,
+        summary=summary,
+        rollout_id=rollout_id,
+        sandbox=sandbox,
+        task_ids=[task.task_id for task in tasks],
+    )
+    return summary
 
 
 def rollout_single_task(

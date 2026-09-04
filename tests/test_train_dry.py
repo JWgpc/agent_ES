@@ -37,7 +37,11 @@ class TestTrainDryRun(unittest.TestCase):
                 generations = 1
                 sigma_schedule = "constant"
                 sigma_warmup_steps = 0
+                num_groups = 2
+                num_gpus = 2
                 population = 2
+                task_limit = 2
+                tasks_per_group = 2
                 alpha = 5e-4
                 reward_normalization = "zscore"
                 gpus = "0,1"
@@ -46,14 +50,19 @@ class TestTrainDryRun(unittest.TestCase):
                 mem_fraction = 0.5
                 context_length = 4096
                 concurrency = 1
-                max_steps = 4
+                max_turns = 4
+                max_tokens = 8192
+                max_total_tokens = 65536
                 turn_timeout = 60
+                task_timeout = 900
+                candidate_parallelism = 1
                 sandbox = "local"
                 served_model_name = "dry"
                 sglang_wait_timeout = 10.0
                 cleanup_merged = True
                 verbose = False
                 es_seed = 42
+                use_es_hook = False
 
             rewards = iter([0.8, 0.2])
 

@@ -1,5 +1,27 @@
+# Local run artifacts (outputs go under /data/gpc/... in production)
 runs/
+checkpoints/
+noise_weight/
+gen_*/
+eval_gen*/
+history.json
+*.log
+
+# Python
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+*.swp
 *.tmp
+
+# Models and large binaries (never commit weights)
+*.safetensors
+*.bin
+*.pt
+*.pth
